@@ -73,3 +73,24 @@ pub async fn paired_watches(device: &impl IdeviceProvider) -> Result<Vec<PairedW
     }
     Ok(watches)
 }
+
+/// Install provisioning profiles on the device's system profile store (misagent),
+/// like Xcode does. AppConduit looks up the Apple Watch app's profile there and
+/// pushes it to the watch before installing the watch app.
+pub async fn install_profiles(
+    device: &impl IdeviceProvider,
+    profiles: Vec<(String, Vec<u8>)>,
+) -> Result<(), Report> {
+    use idevice::misagent::MisagentClient;
+
+    let mut client = MisagentClient::connect(device)
+        .await
+        .context("Failed to connect to misagent")?;
+    for (name, data) in profiles {
+        match client.install(data).await {
+            Ok(()) => tracing::info!("Installed provisioning profile on device: {}", name),
+            Err(e) => tracing::warn!("Failed to install provisioning profile {}: {}", name, e),
+        }
+    }
+    Ok(())
+}

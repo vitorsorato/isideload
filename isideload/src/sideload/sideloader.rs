@@ -357,6 +357,33 @@ impl<C: MaxCertsCallback, E: ExtensionsBehaviorCallback> Sideloader<C, E> {
             )
             .await?;
 
+        // Put the provisioning profiles in the iPhone's profile store (like Xcode does)
+        // so AppConduit can hand the Watch app's profile to the watch.
+        let mut profiles_to_install: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut bundle_dirs = vec![signed_app_path.clone()];
+        for sub in ["Watch", "PlugIns"] {
+            if let Ok(entries) = isideload_vfs::fs::read_dir(signed_app_path.join(sub)) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    bundle_dirs.push(entry.path());
+                }
+            }
+        }
+        for dir in bundle_dirs {
+            let profile_path = dir.join("embedded.mobileprovision");
+            if let Ok(data) = isideload_vfs::fs::read(&profile_path) {
+                let name = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                profiles_to_install.push((name, data));
+            }
+        }
+        if let Err(e) =
+            crate::util::device::install_profiles(device_provider, profiles_to_install).await
+        {
+            tracing::warn!("Could not install provisioning profiles on device: {}", e);
+        }
+
         info!("Transferring App...");
 
         let last_logged_progress = std::sync::Arc::new(std::sync::Mutex::new(0));
