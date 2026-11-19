@@ -218,22 +218,21 @@ impl<C: MaxCertsCallback, E: ExtensionsBehaviorCallback> Sideloader<C, E> {
                         e.is_watch_app() && e.bundle_identifier() == Some(bundle_id.as_str())
                     });
 
-                    // Watch apps get a watchOS profile (which lists the registered watches);
-                    // fall back to the default profile type if Apple refuses.
+                    // Watch apps: ask for the profile the way Xcode does (DTDeviceClass=watch),
+                    // then fall back to the default profile type.
                     let watch_profile = if is_watch {
                         match self
                             .dev_session
-                            .download_team_provisioning_profile(
-                                &team,
-                                &id,
-                                crate::dev::device_type::DeveloperDeviceType::Watchos,
-                            )
+                            .download_team_provisioning_profile_for_class(&team, &id, "watch")
                             .await
                         {
-                            Ok(p) => Some(p),
+                            Ok(p) => {
+                                info!("Got watch-class provisioning profile for {}", bundle_id);
+                                Some(p)
+                            }
                             Err(e) => {
                                 tracing::warn!(
-                                    "watchOS profile download failed for {} ({}), using the default profile",
+                                    "Watch-class profile download failed for {} ({}), using the default profile",
                                     bundle_id,
                                     e
                                 );
@@ -262,7 +261,11 @@ impl<C: MaxCertsCallback, E: ExtensionsBehaviorCallback> Sideloader<C, E> {
 
                     let parsed_profile =
                         ProvisioningProfile::parse(profile.encoded_profile.as_ref())?;
-                    let entitlements = parsed_profile.entitlements().clone();
+                    let entitlements = if is_watch {
+                        xcode_style_entitlements(parsed_profile.entitlements(), &team.team_id, &bundle_id)
+                    } else {
+                        parsed_profile.entitlements().clone()
+                    };
 
                     provisioning_profiles.push((bundle_id, profile, entitlements));
                 }
@@ -498,4 +501,37 @@ fn log_profile_devices(bundle_id: &str, profile: &Profile) {
         devices.len(),
         devices.join(", ")
     );
+}
+
+/// Entitlements the way Xcode signs a development build: only the keys an app actually
+/// gets, with the exact app identifier instead of the profile's `TEAM.*` wildcards.
+fn xcode_style_entitlements(
+    profile_entitlements: &Dictionary,
+    team_id: &str,
+    bundle_id: &str,
+) -> Dictionary {
+    let mut out = Dictionary::new();
+    let app_identifier = format!("{}.{}", team_id, bundle_id);
+    out.insert(
+        "application-identifier".to_string(),
+        plist::Value::String(app_identifier.clone()),
+    );
+    out.insert(
+        "com.apple.developer.team-identifier".to_string(),
+        plist::Value::String(team_id.to_string()),
+    );
+    let get_task_allow = profile_entitlements
+        .get("get-task-allow")
+        .and_then(|v| v.as_boolean())
+        .unwrap_or(true);
+    out.insert(
+        "get-task-allow".to_string(),
+        plist::Value::Boolean(get_task_allow),
+    );
+    out.insert(
+        "keychain-access-groups".to_string(),
+        plist::Value::Array(vec![plist::Value::String(app_identifier)]),
+    );
+    info!("Watch app entitlements: {:?}", out);
+    out
 }

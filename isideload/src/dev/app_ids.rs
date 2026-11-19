@@ -151,6 +151,33 @@ pub trait AppIdsApi {
         Ok(())
     }
 
+    /// Same as `download_team_provisioning_profile`, but tells Apple which device class
+    /// the profile is for (what Xcode sends for Apple Watch apps: "watch").
+    async fn download_team_provisioning_profile_for_class(
+        &mut self,
+        team: &DeveloperTeam,
+        app_id: &AppId,
+        device_class: &str,
+    ) -> Result<Profile, Report> {
+        let body = plist!(dict {
+            "teamId": &team.team_id,
+            "appIdId": &app_id.app_id_id,
+            "DTDeviceClass": device_class,
+        });
+
+        let response: Profile = self
+            .developer_session()
+            .send_dev_request(
+                &dev_url("downloadTeamProvisioningProfile", None),
+                body,
+                "provisioningProfile",
+            )
+            .await
+            .context("Failed to download provisioning profile")?;
+
+        Ok(response)
+    }
+
     async fn download_team_provisioning_profile(
         &mut self,
         team: &DeveloperTeam,

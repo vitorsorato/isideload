@@ -198,6 +198,7 @@ async fn main() {
             .max_certs_behavior(MaxCertsBehavior::Prompt(cert_selection_prompt))
             .storage(Box::new(KeyringStorage::new("watchload".to_string())))
             .machine_name("watchload".to_string())
+            .delete_app_after_install(std::env::var("WATCHLOAD_KEEP").is_err())
             .build();
 
     let result = sideloader
@@ -214,6 +215,12 @@ async fn main() {
             println!();
             println!("App instalado no iPhone!");
             println!("Agora abra o app Watch no iPhone > Meu Relógio > Apps Disponíveis e toque em Instalar.");
+            if std::env::var("WATCHLOAD_KEEP").is_ok() {
+                println!(
+                    "App assinado guardado em: {}",
+                    std::env::temp_dir().display()
+                );
+            }
         }
         Err(e) => {
             eprintln!("Erro: {e}");
