@@ -108,7 +108,13 @@ impl<C: MaxCertsCallback, E: ExtensionsBehaviorCallback> Sideloader<C, E> {
 
         let main_bundle_id = app.main_bundle_id()?;
         let main_app_name = app.main_app_name()?;
-        let main_app_id_str = format!("{}.{}", main_bundle_id, team.team_id);
+        let team_suffix = format!(".{}", team.team_id);
+        // Don't append the team ID twice if the IPA was already patched with it
+        let main_app_id_str = if main_bundle_id.ends_with(&team_suffix) {
+            main_bundle_id.clone()
+        } else {
+            format!("{}{}", main_bundle_id, team_suffix)
+        };
         app.update_bundle_id(&main_bundle_id, &main_app_id_str)?;
 
         let extensions_behavior = self
@@ -208,14 +214,51 @@ impl<C: MaxCertsCallback, E: ExtensionsBehaviorCallback> Sideloader<C, E> {
                 {
                     let bundle_id = id.identifier.clone();
 
-                    let profile = self
-                        .dev_session
-                        .download_team_provisioning_profile(&team, &id, None)
-                        .await
-                        .context(format!(
-                            "Failed to download provisioning profile for {}",
-                            bundle_id
-                        ))?;
+                    let is_watch = app.bundle.app_extensions().iter().any(|e| {
+                        e.is_watch_app() && e.bundle_identifier() == Some(bundle_id.as_str())
+                    });
+
+                    // Watch apps get a watchOS profile (which lists the registered watches);
+                    // fall back to the default profile type if Apple refuses.
+                    let watch_profile = if is_watch {
+                        match self
+                            .dev_session
+                            .download_team_provisioning_profile(
+                                &team,
+                                &id,
+                                crate::dev::device_type::DeveloperDeviceType::Watchos,
+                            )
+                            .await
+                        {
+                            Ok(p) => Some(p),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "watchOS profile download failed for {} ({}), using the default profile",
+                                    bundle_id,
+                                    e
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    let profile = match watch_profile {
+                        Some(p) => p,
+                        None => self
+                            .dev_session
+                            .download_team_provisioning_profile(&team, &id, None)
+                            .await
+                            .context(format!(
+                                "Failed to download provisioning profile for {}",
+                                bundle_id
+                            ))?,
+                    };
+
+                    if is_watch {
+                        log_profile_devices(&bundle_id, &profile);
+                    }
 
                     let parsed_profile =
                         ProvisioningProfile::parse(profile.encoded_profile.as_ref())?;
@@ -291,6 +334,15 @@ impl<C: MaxCertsCallback, E: ExtensionsBehaviorCallback> Sideloader<C, E> {
             .ensure_device_registered(&team, &device_info.name, &device_info.udid, None)
             .await?;
 
+        // Register paired Apple Watches too, so the provisioning profiles include
+        // them and an embedded Watch app can actually be installed on the watch.
+        let has_watch_app = Application::new(app_path.clone())
+            .map(|a| a.bundle.app_extensions().iter().any(|e| e.is_watch_app()))
+            .unwrap_or(false);
+        if has_watch_app {
+            self.register_paired_watches(device_provider, &team).await;
+        }
+
         let (signed_app_path, special_app) = self
             .sign_app(
                 app_path,
@@ -322,6 +374,61 @@ impl<C: MaxCertsCallback, E: ExtensionsBehaviorCallback> Sideloader<C, E> {
         }
 
         Ok(special_app)
+    }
+
+    #[cfg(feature = "install")]
+    /// Register every Apple Watch paired with the connected iPhone as a development device.
+    /// Extra UDIDs can be given with the `ISIDELOAD_WATCH_UDID` environment variable
+    /// (comma separated) in case the paired watch can't be detected automatically.
+    pub async fn register_paired_watches(
+        &mut self,
+        device_provider: &impl IdeviceProvider,
+        team: &DeveloperTeam,
+    ) {
+        use crate::dev::device_type::DeveloperDeviceType;
+
+        let mut watches: Vec<(String, String)> =
+            match crate::util::device::paired_watches(device_provider).await {
+                Ok(w) => w.into_iter().map(|w| (w.name, w.udid)).collect(),
+                Err(e) => {
+                    tracing::warn!("Could not list paired Apple Watches: {}", e);
+                    Vec::new()
+                }
+            };
+        if let Ok(extra) = std::env::var("ISIDELOAD_WATCH_UDID") {
+            for udid in extra.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                if !watches.iter().any(|(_, u)| u.eq_ignore_ascii_case(udid)) {
+                    watches.push(("Apple Watch".to_string(), udid.to_string()));
+                }
+            }
+        }
+        if watches.is_empty() {
+            tracing::warn!(
+                "No paired Apple Watch found; the Watch app will probably fail to install"
+            );
+            return;
+        }
+
+        for (name, udid) in watches {
+            info!("Registering Apple Watch {} ({})", name, udid);
+            let res = self
+                .dev_session
+                .ensure_device_registered(team, &name, &udid, DeveloperDeviceType::Watchos)
+                .await;
+            if let Err(e) = res {
+                tracing::warn!(
+                    "watchOS registration failed ({}), retrying with the default device type",
+                    e
+                );
+                if let Err(e) = self
+                    .dev_session
+                    .ensure_device_registered(team, &name, &udid, None)
+                    .await
+                {
+                    tracing::warn!("Failed to register Apple Watch {}: {}", udid, e);
+                }
+            }
+        }
     }
 
     /// Get the developer team according to the configured team selection behavior
@@ -367,4 +474,28 @@ impl<C: MaxCertsCallback, E: ExtensionsBehaviorCallback> Sideloader<C, E> {
     pub fn get_email(&self) -> &str {
         &self.apple_email
     }
+}
+
+/// Log which devices a provisioning profile covers (the plist is stored in clear text inside the CMS envelope)
+fn log_profile_devices(bundle_id: &str, profile: &Profile) {
+    let data: &[u8] = profile.encoded_profile.as_ref();
+    let text = String::from_utf8_lossy(data);
+    let devices: Vec<String> = text
+        .split("<key>ProvisionedDevices</key>")
+        .nth(1)
+        .and_then(|rest| rest.split("</array>").next())
+        .map(|arr| {
+            arr.split("<string>")
+                .skip(1)
+                .filter_map(|s| s.split("</string>").next())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    info!(
+        "Profile for {} covers {} device(s): {}",
+        bundle_id,
+        devices.len(),
+        devices.join(", ")
+    );
 }

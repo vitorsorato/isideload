@@ -45,23 +45,29 @@ impl Bundle {
             "Failed to parse Info.plist".to_string(),
         ))?;
 
-        // Load app extensions from PlugIns directory
-        let plug_ins_dir = bundle_path.join("PlugIns");
-        let app_extensions = if isideload_vfs::fs::metadata(&plug_ins_dir).is_ok() {
-            isideload_vfs::fs::read_dir(&plug_ins_dir)
-                .context(SideloadError::InvalidBundle(
-                    "Failed to read PlugIns directory".to_string(),
-                ))?
+        // Load app extensions from PlugIns directory, and embedded Apple Watch apps
+        // from the Watch directory. Watch apps need their own app ID, provisioning
+        // profile and signature just like extensions do.
+        let mut app_extensions = Vec::new();
+        for folder in ["PlugIns", "Watch"] {
+            let dir = bundle_path.join(folder);
+            if isideload_vfs::fs::metadata(&dir).is_err() {
+                continue;
+            }
+            let mut found: Vec<Bundle> = isideload_vfs::fs::read_dir(&dir)
+                .context(SideloadError::InvalidBundle(format!(
+                    "Failed to read {} directory",
+                    folder
+                )))?
                 .filter_map(|entry| entry.ok())
                 .filter(|entry| {
                     entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
                         && isideload_vfs::fs::metadata(&entry.path().join("Info.plist")).is_ok()
                 })
                 .filter_map(|entry| Bundle::new(entry.path()).ok())
-                .collect()
-        } else {
-            Vec::new()
-        };
+                .collect();
+            app_extensions.append(&mut found);
+        }
 
         // Load frameworks from Frameworks directory
         let frameworks_dir = bundle_path.join("Frameworks");
@@ -119,6 +125,17 @@ impl Bundle {
         self.app_info
             .get("CFBundleIdentifier")
             .and_then(|v| v.as_string())
+    }
+
+    /// Whether this bundle is an Apple Watch app (embedded in a `Watch/` folder)
+    pub fn is_watch_app(&self) -> bool {
+        self.app_info.contains_key("WKCompanionAppBundleIdentifier")
+            || self.app_info.contains_key("WKWatchKitApp")
+            || self
+                .bundle_dir
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n == "Watch")
     }
 
     pub fn bundle_name(&self) -> Option<&str> {

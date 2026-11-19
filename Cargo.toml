@@ -1,4 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["examples/minimal","isideload"]
+members = ["examples/minimal", "examples/watchload", "isideload"]
 default-members = ["isideload"]
+exclude = ["vendor"]
+
+# Versão local do assinador com suporte a apps de Apple Watch (pasta Watch/)
+[patch.crates-io]
+apple-codesign-quick = { path = "vendor/apple-codesign-quick" }

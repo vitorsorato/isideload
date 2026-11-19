@@ -166,8 +166,11 @@ impl Application {
     ) -> Result<(), Report> {
         let extensions = self.bundle.app_extensions_mut();
         for ext in extensions.iter_mut() {
-            if let Some(id) = ext.bundle_identifier() {
-                if !(id.starts_with(main_app_bundle_id) && id.len() > main_app_bundle_id.len()) {
+            if let Some(id) = ext.bundle_identifier().map(|s| s.to_string()) {
+                if id.starts_with(main_app_id_str) && id.len() > main_app_id_str.len() {
+                    // Already rewritten (e.g. an IPA that was patched by hand); keep it.
+                } else if !(id.starts_with(main_app_bundle_id) && id.len() > main_app_bundle_id.len())
+                {
                     bail!(SideloadError::InvalidBundle(format!(
                         "Extension {} is not part of the main app bundle identifier: {}",
                         ext.bundle_name().unwrap_or("Unknown"),
@@ -180,6 +183,21 @@ impl Application {
                         &id[main_app_bundle_id.len()..]
                     ));
                 }
+            }
+
+            // Apple Watch apps must point at the (renamed) iPhone app, otherwise the
+            // iPhone refuses the install with InvalidCompanionAppBundleIdentifier.
+            if ext.is_watch_app() {
+                ext.app_info.insert(
+                    "WKCompanionAppBundleIdentifier".to_string(),
+                    plist::Value::String(main_app_id_str.to_string()),
+                );
+                info!(
+                    "Watch app {} -> {} (companion {})",
+                    ext.bundle_name().unwrap_or("Unknown"),
+                    ext.bundle_identifier().unwrap_or(""),
+                    main_app_id_str
+                );
             }
         }
         self.bundle.set_bundle_identifier(main_app_id_str);

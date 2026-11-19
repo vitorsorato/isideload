@@ -1,0 +1,49 @@
+name: Build watchload (macOS)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: watchload-${{ runner.os }}-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Testes do assinador (pasta Watch/)
+        run: cargo test --manifest-path vendor/apple-codesign-quick/Cargo.toml --lib
+
+      - name: Compilar (Apple Silicon + Intel)
+        run: |
+          cargo build --release -p watchload --target aarch64-apple-darwin
+          cargo build --release -p watchload --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/watchload \
+            target/aarch64-apple-darwin/release/watchload \
+            target/x86_64-apple-darwin/release/watchload
+          chmod +x dist/watchload
+          lipo -info dist/watchload
+          cd dist && zip -q watchload-macos.zip watchload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: watchload-macos
+          path: dist/watchload-macos.zip
+          if-no-files-found: error
